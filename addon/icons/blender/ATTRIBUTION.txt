@@ -1,0 +1,11 @@
+These icons are Blender's own UI icons, extracted as individual PNG files by:
+  nikogoli/Blender_UI_icons_png
+  https://github.com/nikogoli/Blender_UI_icons_png
+
+Original source: Blender (https://www.blender.org), Blender Foundation.
+License: Creative Commons Attribution-ShareAlike 4.0 International (CC BY-SA 4.0)
+  https://creativecommons.org/licenses/by-sa/4.0/
+
+This is the full 40x40 set from the source repo's `png_icons(40_40).zip`
+(672 icons, 2026-09-25 -- previously only a curated ~111-icon subset was
+included). Filenames match Blender's internal icon identifiers.

@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://easyshelf-addon.github.io/EasyShelf/sitemap.xml

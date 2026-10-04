@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EasyShelf</title>
+  <meta name="description" content="A Maya-shelf-style floating toolbar addon for Blender.">
+  <meta name="google-site-verification" content="oZxd_qDwwrDX5-ElE0aDjexueUcaZrGMapbwuD54mDs" />
+  <link rel="canonical" href="https://easyshelf-addon.github.io/EasyShelf/">
+  <link rel="icon" href="assets/logo/favicon.ico" sizes="any">
+  <link rel="icon" type="image/png" href="assets/logo/easyshelf-icon-32.png" sizes="32x32">
+  <link rel="icon" type="image/png" href="assets/logo/easyshelf-icon-16.png" sizes="16x16">
+  <link rel="apple-touch-icon" href="assets/logo/easyshelf-icon-180.png">
+  <meta property="og:title" content="EasyShelf">
+  <meta property="og:description" content="A Maya-shelf-style floating toolbar addon for Blender.">
+  <meta property="og:image" content="https://easyshelf-addon.github.io/EasyShelf/assets/screenshots/hero-shelf.png">
+  <meta property="og:url" content="https://easyshelf-addon.github.io/EasyShelf/">
+  <meta property="og:type" content="website">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/style.css">
+</head>
+<body>
+  <header>
+    <nav class="wrap">
+      <span class="brand"><img src="assets/logo/easyshelf-icon-64.png" alt="" width="24" height="24" class="brand-icon"><span>Easy<span class="brand-accent">Shelf</span></span></span>
+      <button id="lang-toggle" type="button">EN</button>
+    </nav>
+  </header>
+
+  <main>
+    <section id="hero">
+      <div class="wrap">
+        <div class="hero-copy">
+          <h1 data-ru="Панель быстрого доступа к инструментам Blender — без сложной настройки" data-en="Quick-access toolbar for Blender — easy to set up">Панель быстрого доступа к инструментам Blender — без сложной настройки</h1>
+          <p data-ru="Быстрый доступ к любимым инструментам прямо во вьюпорте — плюс радиальное пай-меню на хоткей." data-en="Quick access to your favorite tools right in the viewport — plus a radial pie menu on a hotkey.">Быстрый доступ к любимым инструментам прямо во вьюпорте — плюс радиальное пай-меню на хоткей.</p>
+          <a href="https://github.com/easyshelf-addon/EasyShelf/releases/latest/download/EasyShelf.zip" class="cta" data-ru="Скачать" data-en="Download">Скачать</a>
+          <a href="#support" class="cta cta-ghost" data-ru="Поддержать" data-en="Support">Поддержать</a>
+        </div>
+        <div class="hero-shot">
+          <img class="zoomable" src="assets/screenshots/hero-shelf.png" alt="EasyShelf floating toolbar overlay in the Blender viewport" width="540" height="130">
+        </div>
+      </div>
+    </section>
+
+    <section id="how" class="wrap">
+      <h2 data-ru="Удобный доступ к инструментам, без лишних кликов" data-en="Easy access to your tools, no extra clicks">Удобный доступ к инструментам, без лишних кликов</h2>
+      <div class="how-grid">
+        <div class="how-card">
+          <figure><img class="zoomable" src="assets/screenshots/shelf-closeup.gif" alt="EasyShelf shelf close-up, animated" width="625" height="314"></figure>
+          <h3 data-ru="Плавающий шелф" data-en="Floating shelf">Плавающий шелф</h3>
+          <p data-ru="Ряд кнопок с вашими командами прямо поверх 3D-вьюпорта — перетаскивается и меняет ориентацию на лету." data-en="A row of your own command buttons right over the 3D viewport — drag it around and flip its orientation on the fly.">Ряд кнопок с вашими командами прямо поверх 3D-вьюпорта — перетаскивается и меняет ориентацию на лету.</p>
+        </div>
+        <div class="how-card">
+          <figure><img class="zoomable" src="assets/screenshots/pie-menu.png" alt="EasyShelf pie menu" width="457" height="302"></figure>
+          <h3 data-ru="Пай-меню на хоткей" data-en="Pie menu on a hotkey">Пай-меню на хоткей</h3>
+          <p data-ru="Те же инструменты в радиальном меню — вызывается хоткеем, не занимает место на экране." data-en="The same tools in a radial menu — summoned with a hotkey, takes no permanent screen space.">Те же инструменты в радиальном меню — вызывается хоткеем, не занимает место на экране.</p>
+        </div>
+        <div class="how-card">
+          <figure><img class="zoomable" src="assets/screenshots/add-to-shelf.png" alt="Add to Shelf from a right-click context menu" width="487" height="310"></figure>
+          <h3 data-ru="Добавление в один клик" data-en="Add with one click">Добавление в один клик</h3>
+          <p data-ru="ПКМ на любой кнопке интерфейса, включая сторонние аддоны, → «Add to Shelf». Без скриптинга." data-en="Right-click any interface button, including third-party addons, → “Add to Shelf.” No scripting required.">ПКМ на любой кнопке интерфейса, включая сторонние аддоны, → «Add to Shelf». Без скриптинга.</p>
+        </div>
+        <div class="how-card how-card-wide">
+          <figure><img class="zoomable" src="assets/screenshots/add-script.png" alt="Add Script: right-click menu and the Text Editor with a pasted script" width="875" height="470"></figure>
+          <div>
+            <h3 data-ru="Свой скрипт — в одну кнопку" data-en="Your own script, one button">Свой скрипт — в одну кнопку</h3>
+            <p data-ru="ПКМ на кнопке шелфа → «Add Script»: вставьте код в Text Editor, и он сам запишется в кнопку. Или «Import Script» — готовый .py-файл. Скрипт можно написать самому или попросить ИИ. Иконка подбирается автоматически." data-en="Right-click a shelf button → “Add Script”: paste your code into the Text Editor and it is saved into the button automatically. Or “Import Script” to use a ready .py file. Write the script yourself or ask an AI to. The icon is picked for you.">ПКМ на кнопке шелфа → «Add Script»: вставьте код в Text Editor, и он сам запишется в кнопку. Или «Import Script» — готовый .py-файл. Скрипт можно написать самому или попросить ИИ. Иконка подбирается автоматически.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section id="download" class="wrap wrap--narrow" hidden>
+      <h2 data-ru="Скачать" data-en="Download">Скачать</h2>
+      <div class="panel">
+        <div class="field">
+          <label for="blender-version-select" data-ru="Моя версия Blender:" data-en="My Blender version:">Моя версия Blender:</label>
+          <select id="blender-version-select"></select>
+        </div>
+        <div id="download-result"></div>
+      </div>
+      <p class="all-versions"><a href="https://github.com/easyshelf-addon/EasyShelf/releases" data-ru="Показать все версии" data-en="Show all versions">Показать все версии</a></p>
+    </section>
+
+    <section id="connect" class="wrap">
+      <div class="connect-grid">
+    <div id="support">
+      <h2 data-ru="Поддержать проект" data-en="Support the project">Поддержать проект</h2>
+      <p data-ru="EasyShelf бесплатный и open-source. Если аддон вам полезен — можно поддержать разработку." data-en="EasyShelf is free and open-source. If the addon is useful to you, you can support its development.">EasyShelf бесплатный и open-source. Если аддон вам полезен — можно поддержать разработку.</p>
+      <a href="https://dalink.to/cococnut_crab" class="cta cta-ghost" target="_blank" rel="noopener" data-ru="Поддержать через DonationAlerts" data-en="Support via DonationAlerts">Поддержать через DonationAlerts</a>
+      <a href="https://boosty.to/gamedev_tut" class="cta cta-ghost" target="_blank" rel="noopener" data-ru="Поддержать на Boosty" data-en="Support on Boosty">Поддержать на Boosty</a>
+    </div>
+
+    <div id="feedback">
+      <h2 data-ru="Обратная связь" data-en="Feedback">Обратная связь</h2>
+      <p data-ru="Баг, идея или вопрос — без аккаунта GitHub и без почты." data-en="A bug, an idea, or a question — no GitHub account or email needed.">Баг, идея или вопрос — без аккаунта GitHub и без почты.</p>
+
+      <form id="feedback-form" class="panel" novalidate>
+        <input type="text" name="website" class="hp-field" tabindex="-1" autocomplete="off" aria-hidden="true">
+
+        <fieldset id="feedback-type">
+          <legend data-ru="Тип обращения" data-en="Type">Тип обращения</legend>
+          <label><input type="radio" name="type" value="bug" required> <span data-ru="Баг" data-en="Bug">Баг</span></label>
+          <label><input type="radio" name="type" value="feature"> <span data-ru="Идея / хотелка" data-en="Feature request">Идея / хотелка</span></label>
+          <label><input type="radio" name="type" value="question"> <span data-ru="Вопрос" data-en="Question">Вопрос</span></label>
+          <label><input type="radio" name="type" value="other"> <span data-ru="Другое" data-en="Other">Другое</span></label>
+        </fieldset>
+
+        <div class="field-group severity-field" hidden>
+          <label for="feedback-severity" data-ru="Насколько критично" data-en="How critical">Насколько критично</label>
+          <select id="feedback-severity" name="severity">
+            <option value="" data-ru="— выберите —" data-en="— choose —" selected disabled>— выберите —</option>
+            <option value="critical" data-ru="Блокирует работу / крашит Blender" data-en="Blocks work / crashes Blender">Блокирует работу / крашит Blender</option>
+            <option value="major" data-ru="Функция не работает" data-en="A feature doesn't work">Функция не работает</option>
+            <option value="minor" data-ru="Мелочь, косметика" data-en="Cosmetic, minor">Мелочь, косметика</option>
+          </select>
+        </div>
+
+        <div class="field-group versions-field" hidden>
+          <div class="field-group">
+            <label for="feedback-blender-version" data-ru="Версия Blender" data-en="Blender version">Версия Blender</label>
+            <input type="text" id="feedback-blender-version" name="blenderVersion" placeholder="4.4.0">
+          </div>
+          <div class="field-group">
+            <label for="feedback-addon-version" data-ru="Версия EasyShelf" data-en="EasyShelf version">Версия EasyShelf</label>
+            <input type="text" id="feedback-addon-version" name="addonVersion" placeholder="0.1.0">
+          </div>
+        </div>
+
+        <div class="field-group">
+          <label for="feedback-description" data-ru="Описание" data-en="Description">Описание</label>
+          <textarea id="feedback-description" name="description" rows="5" required></textarea>
+        </div>
+
+        <div class="field-group">
+          <label for="feedback-contact" data-ru="Контакт для ответа (необязательно, будет виден публично в GitHub Issues)" data-en="Contact info (optional, will be publicly visible on GitHub)">Контакт для ответа (необязательно, будет виден публично в GitHub Issues)</label>
+          <input type="text" id="feedback-contact" name="contact">
+        </div>
+
+        <button type="submit" class="cta" data-ru="Отправить" data-en="Submit">Отправить</button>
+        <div id="feedback-result"></div>
+      </form>
+    </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <a href="https://github.com/easyshelf-addon/EasyShelf" class="footer-link">
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z"/></svg>
+      <span data-ru="Исходный код на GitHub" data-en="Source code on GitHub">Исходный код на GitHub</span>
+    </a>
+  </footer>
+
+  <script src="assets/logic.js"></script>
+  <script src="assets/main.js"></script>
+  <script src="assets/feedback.js"></script>
+  <script src="assets/lightbox.js"></script>
+  </body>
+</html>

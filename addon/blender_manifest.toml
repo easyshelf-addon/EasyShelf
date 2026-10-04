@@ -1,0 +1,21 @@
+schema_version = "1.0.0"
+
+id = "easy_shelf"
+version = "0.3.0"
+name = "EasyShelf"
+tagline = "Customizable quick-access button shelf for any workflow"
+maintainer = "DenisZakharov"
+type = "add-on"
+
+website = "https://easyshelf-addon.github.io/EasyShelf/"
+
+tags = ["3D View", "User Interface"]
+
+license = [
+  "SPDX:GPL-3.0-or-later",
+]
+
+blender_version_min = "4.2.0"
+
+[permissions]
+files = "Export and import settings and scripts"
