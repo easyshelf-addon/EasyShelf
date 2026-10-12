@@ -4,7 +4,7 @@
 # bl_info directly hits "NameError: name 'bl_info' is not defined" on
 # reinstall/reload. Capture what we need into a plain constant right here,
 # while bl_info still exists, and use this everywhere else instead.
-ADDON_VERSION = (0, 3, 0)
+ADDON_VERSION = (0, 3, 2)
 
 import os
 import re
@@ -12,6 +12,7 @@ import json
 import math
 import time
 import ast
+import hashlib
 import bpy
 import bmesh
 import gpu
@@ -26,13 +27,13 @@ CONFIG_FILE = os.path.join(ADDON_DIR, "shelf_config.json")
 
 BASE_BTN = 40
 BASE_PAD = 10
+BASE_SEP = 6  # a separator's slot length along the shelf; the pad on both sides adds to its hit area
 DEFAULT_TOP_MARGIN = 40
 DEFAULT_LEFT_MARGIN_PCT = 0.03
 PRESET_EDGE_MARGIN = 20
 
 # Rewritten to "easyshelf" by build_extension.py --edition easyshelf. The Extensions
-# Platform edition drops the update checker (updates come from the platform) and the
-# FBX-exporter patch (the ToS forbid tampering with Blender internals / other add-ons).
+# Platform edition drops the update checker (updates come from the platform).
 EDITION = "easyshelf"
 
 
@@ -70,7 +71,7 @@ def make_roundcube_bmesh(cuts=3, radius=1.0):
 # ---------------------------------------------------------------------------
 # Third-party addon operators (HardOps' Radial Array etc.) are often
 # Python-implemented and define their own modal() -- their real behavior
-# only runs when invoked (invoke()/modal()), not when called bare. exec()
+# only runs when invoked (invoke()/modal()), not when called bare. Running a command
 # calls bpy.ops under the implicit EXEC_DEFAULT context, which skips
 # invoke() entirely: the operator's execute() runs (if it has one) with no
 # arguments and no interactive state, so it silently does nothing. This
@@ -168,12 +169,44 @@ class _ShelfBpy:
 _shelf_bpy = _ShelfBpy()
 
 
-def _exec_shelf_command(command):
-    exec(command, {"bpy": _shelf_bpy, "__name__": "__main__"})
 
 
-_pending_export_selection = None
+if EDITION == "easyshelf":
+    # Extensions Platform forbids exec/eval. A button command is either one literal
+    # `bpy.ops.x.y(...)` call (parsed with ast, called directly) or a script: written to a
+    # per-user cache file and run by Blender's own Run Script operator. The cache file starts
+    # with an import that keeps the INVOKE_DEFAULT proxy above for bare bpy.ops calls.
+    # ponytail: cache files are never pruned (one tiny file per distinct command).
+    def _simple_op_call(command):
+        try:
+            call = ast.parse(command.strip(), mode='eval').body
+            if not isinstance(call, ast.Call) or any(kw.arg is None for kw in call.keywords):
+                return None
+            func = call.func
+            parts = []
+            while isinstance(func, ast.Attribute):
+                parts.append(func.attr)
+                func = func.value
+            if not (isinstance(func, ast.Name) and func.id == "bpy" and len(parts) == 3 and parts[2] == "ops"):
+                return None
+            args = [ast.literal_eval(a) for a in call.args]
+            kwargs = {kw.arg: ast.literal_eval(kw.value) for kw in call.keywords}
+        except (SyntaxError, ValueError):
+            return None
+        return getattr(getattr(_shelf_bpy.ops, parts[1]), parts[0]), args, kwargs
 
+    def _exec_shelf_command(command):
+        simple = _simple_op_call(command)
+        if simple:
+            op, args, kwargs = simple
+            return op(*args, **kwargs)
+        cache = bpy.utils.extension_path_user(__package__, path="run_cache", create=True)
+        path = os.path.join(cache, hashlib.sha1(command.encode("utf-8")).hexdigest()[:16] + ".py")
+        if not os.path.exists(path):
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(f"from {__package__} import _shelf_bpy as bpy\n{command}\n")
+        if bpy.ops.script.python_file_run(filepath=path) != {'FINISHED'}:
+            raise RuntimeError("script failed, see the system console")
 
 
 class EASYSHELF_OT_add_roundcube(bpy.types.Operator):
@@ -204,7 +237,7 @@ class EASYSHELF_OT_add_roundcube(bpy.types.Operator):
 # ---------------------------------------------------------------------------
 # Preferences -- persistent, user-editable shelf button list.
 # Each button is {label, icon_path, command, enabled}; "command" is a Python
-# snippet exec'd on click (same mechanism "Add to Shelf" already used).
+# snippet run on click (same mechanism "Add to Shelf" already used).
 # ---------------------------------------------------------------------------
 
 BLENDER_ICON_DIR = os.path.join(ICON_DIR, "blender")
@@ -564,6 +597,10 @@ class EASYSHELF_button_item(bpy.types.PropertyGroup):
                                          update=lambda self, context: _on_prefs_changed())
     is_separator: bpy.props.BoolProperty(name="Separator", default=False,
                                           update=lambda self, context: _on_prefs_changed())
+    collapsed: bpy.props.BoolProperty(
+        name="Collapsed", default=False,
+        description="Separator only: hide the buttons after it, up to the next separator",
+        update=lambda self, context: _on_prefs_changed())
 
 
 class EASYSHELF_command_param(bpy.types.PropertyGroup):
@@ -807,18 +844,32 @@ def _should_draw_shelf():
     return True
 
 
-def _export_button_enabled():
-    prefs = get_prefs()
-    # FBX export only makes sense next to 3D content, not in UV/Node editors
-    return bool(prefs and prefs.show_export_button and _active_target is not None
-                and _CONTEXTS[_active_target][2] == 'VIEW_3D')
+def _slot_sizes(items):
+    # Slot length along the shelf: a full button, or a narrow one for a
+    # separator. If there's nothing at all to show (no buttons), keep one
+    # empty slot so the panel itself stays visible as an anchor instead of
+    # disappearing.
+    btn, sep = _btn_size(), _sep_size()
+    return [sep if b.is_separator else btn for b in items] or [btn]
 
 
-def _total_slots(items):
-    # FBX takes slot 0 inside the panel when enabled. If there's nothing at
-    # all to show (no buttons, FBX off), keep one empty slot so the panel
-    # itself stays visible as an anchor instead of disappearing entirely.
-    return max(len(items) + (1 if _export_button_enabled() else 0), 1)
+def _hit_rect(rect, item):
+    """Separators are thin, so their click/hover area grows by half a pad on
+    each side along the shelf (up to the midpoint of the gap to the neighbour,
+    so it never overlaps a button's own rect)."""
+    if not item.is_separator:
+        return rect
+    x0, y0, x1, y1 = rect
+    g = _pad_size() / 2.0
+    return (x0, y0 - g, x1, y1 + g) if _is_vertical() else (x0 - g, y0, x1 + g, y1)
+
+
+def _slot_at(rects, items, mx, my):
+    for i, r in enumerate(rects):
+        x0, y0, x1, y1 = _hit_rect(r, items[i])
+        if x0 <= mx <= x1 and y0 <= my <= y1:
+            return i
+    return None
 
 
 def _portable_icon_path(icon_path):
@@ -879,7 +930,8 @@ _loading_config = False
 
 def _serialize_items(coll):
     return [{"label": b.label, "icon_path": _portable_icon_path(b.icon_path), "command": b.command,
-              "enabled": b.enabled, "show_in_pie": b.show_in_pie, "is_separator": b.is_separator} for b in coll]
+              "enabled": b.enabled, "show_in_pie": b.show_in_pie, "is_separator": b.is_separator,
+              "collapsed": b.collapsed} for b in coll]
 
 
 def _deserialize_items(coll, data_list):
@@ -892,6 +944,7 @@ def _deserialize_items(coll, data_list):
         item.enabled = d.get("enabled", True)
         item.show_in_pie = d.get("show_in_pie", True)
         item.is_separator = d.get("is_separator", False)
+        item.collapsed = d.get("collapsed", False)
 
 
 def _config_to_dict(prefs):
@@ -908,7 +961,6 @@ def _config_to_dict(prefs):
         "separator_color": list(prefs.separator_color),
         "show_label": prefs.show_label,
         "show_number": prefs.show_number,
-        "show_export_button": prefs.show_export_button,
         "label_placement": prefs.label_placement,
         "label_placement_v": prefs.label_placement_v,
         "orientation": prefs.orientation,
@@ -931,6 +983,11 @@ def _config_to_dict(prefs):
     }
 
 
+def _legacy_ids_to_easyshelf(text):
+    """EasyShelf edition only: stored button commands may reference the old operator ids."""
+    return text.replace("blender_shelf.", "easy_shelf.").replace("blendershelf_", "easyshelf_")  # EDITION-KEEP
+
+
 def _import_easyshelf_config(path):
     """EasyShelf edition only: first run without a config of its own adopts the user's EasyShelf
     shelf. Copies, never moves, so the old add-on keeps working untouched. Best effort."""
@@ -944,8 +1001,7 @@ def _import_easyshelf_config(path):
             if os.path.isfile(src):
                 with open(src, "r", encoding="utf-8") as f:
                     text = f.read()
-                # stored button commands may reference the old operator ids
-                text = text.replace("blender_shelf.", "easy_shelf.").replace("blendershelf_", "easyshelf_")  # EDITION-KEEP
+                text = _legacy_ids_to_easyshelf(text)
                 with open(path, "w", encoding="utf-8") as f:
                     f.write(text)
                 return
@@ -1014,7 +1070,10 @@ def _load_config_from_path(prefs, path):
     global _loading_config
     try:
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            text = f.read()
+        if EDITION == "easyshelf":  # a settings file exported from EasyShelf
+            text = _legacy_ids_to_easyshelf(text)
+        data = json.loads(text)
     except (OSError, ValueError):
         return False
     saved_version = tuple(data.get("version", (0, 0, 0)))
@@ -1033,7 +1092,6 @@ def _load_config_from_path(prefs, path):
         prefs.separator_color = data.get("separator_color", [1.0, 1.0, 1.0, 0.4])
         prefs.show_label = data.get("show_label", True)
         prefs.show_number = data.get("show_number", True)
-        prefs.show_export_button = data.get("show_export_button", True)
         prefs.label_placement = data.get("label_placement", 'INSIDE')
         prefs.label_placement_v = data.get("label_placement_v", prefs.label_placement)
         prefs.orientation = data.get("orientation", 'HORIZONTAL')
@@ -1104,14 +1162,24 @@ def _enabled_items():
     if prefs is None or _active_target is None:
         return []
     coll, _ = _target_collection(prefs, _active_target)
-    return [b for b in coll if b.enabled]
+    return [coll[i] for i in _visible_real_indices(coll)]
 
 
 def _visible_real_indices(coll):
-    """_enabled_items() is filtered; this maps each visible slot's position
-    (0..N-1, same order as _enabled_items()/shelf_geometry()'s rects) back to
-    its real index in the full prefs.buttons collection."""
-    return [i for i, b in enumerate(coll) if b.enabled]
+    """The shelf shows only enabled buttons that aren't hidden by a collapsed
+    separator (which hides everything up to the next separator). This maps
+    each visible slot's position (0..N-1, same order as _enabled_items()/
+    shelf_geometry()'s rects) back to its real index in the full collection."""
+    out, hidden = [], False
+    for i, b in enumerate(coll):
+        if not b.enabled:
+            continue
+        if b.is_separator:
+            hidden = b.collapsed
+            out.append(i)
+        elif not hidden:
+            out.append(i)
+    return out
 
 
 def _gap_under_mouse(rects, mx, my, vertical):
@@ -1557,7 +1625,7 @@ class EASYSHELF_OT_edit_params(bpy.types.Operator):
     """Edit a captured command's keyword arguments as plain fields, e.g.
     tweak a primitive's radius/vertex count without touching Python. Stands
     in for Blender's own 'Adjust Last Operation' panel, which never appears
-    for shelf/pie buttons since they run via exec(), not a native UI click --
+    for shelf/pie buttons since they run via the shelf runner, not a native UI click --
     see FEEDBACK.md for why that panel can't be made to show up normally"""
     bl_idname = "easy_shelf.edit_params"
     bl_label = "Edit Parameters"
@@ -1628,12 +1696,11 @@ def _center_shelf_position(prefs, region, target):
     global _active_target
     _active_target = target
     items = _enabled_items()
-    total_slots = _total_slots(items)
     # _panel_size() involves _btn_size()/_pad_size(), which are floats --
     # top_margin is an IntProperty (a bare float raises), left_margin_pct
     # is a fraction of region.width so it survives a resize/split.
     vertical = _is_vertical()
-    panel_w, panel_h = _panel_size(total_slots, vertical)
+    panel_w, panel_h = _panel_size(items, vertical)
 
     center_x = max(0.0, (region.width - panel_w) / 2.0)
     left_px = center_x if vertical else max(0.0, center_x - _aux_reserve())
@@ -1952,8 +2019,6 @@ class EasyShelfPreferences(bpy.types.AddonPreferences):
                                         update=lambda self, context: _on_prefs_changed())
     show_number: bpy.props.BoolProperty(name="Show Number", default=False,
                                          update=lambda self, context: _on_prefs_changed())
-    show_export_button: bpy.props.BoolProperty(name="Show FBX Export Button", default=False,
-                                                update=lambda self, context: _on_prefs_changed())
     label_placement: bpy.props.EnumProperty(
         name="Label Placement (Horizontal)",
         items=_LABEL_PLACEMENT_ITEMS,
@@ -1983,6 +2048,7 @@ class EasyShelfPreferences(bpy.types.AddonPreferences):
 
     def draw(self, context):
         layout = self.layout
+
 
         # Boxed + labeled so it reads as a separate group from the per-context
         # shelf settings below, instead of blending into the same visual block.
@@ -2020,9 +2086,7 @@ class EasyShelfPreferences(bpy.types.AddonPreferences):
             row.prop(self, "separator_color")
             panel.row().operator("easy_shelf.reset_appearance", icon='LOOP_BACK')
 
-            row = panel.row()
-            row.prop(self, "show_number")
-            row.prop(self, "show_export_button")
+            panel.row().prop(self, "show_number")
 
         layout.row().prop(self, "ui_context", expand=True)
         target = self.ui_context
@@ -2186,7 +2250,7 @@ def _activate_brush_command(op):
     # relative_asset_identifier is a filesystem path (backslashes on
     # Windows) -- embed it via repr(), not a manual f-string quote, or a
     # path segment that happens to look like an escape (\n, \t, ...) would
-    # corrupt the generated command when it's exec()'d back.
+    # corrupt the generated command when it's run back.
     lib_type = getattr(op, "asset_library_type", "ESSENTIALS")
     lib_id = getattr(op, "asset_library_identifier", "")
     rel_id = getattr(op, "relative_asset_identifier", "")
@@ -2536,11 +2600,15 @@ def _pad_size():
     return BASE_PAD * _shelf_scale()
 
 
-def _panel_size(n, vertical):
+def _sep_size():
+    return BASE_SEP * _shelf_scale()
+
+
+def _panel_size(items, vertical):
     btn, pad = _btn_size(), _pad_size()
-    if vertical:
-        return btn + pad * 2, pad * 2 + n * btn + (n - 1) * pad
-    return pad * 2 + n * btn + (n - 1) * pad, btn + pad * 2
+    sizes = _slot_sizes(items)
+    length = pad * 2 + sum(sizes) + (len(sizes) - 1) * pad
+    return (btn + pad * 2, length) if vertical else (length, btn + pad * 2)
 
 
 def _sidebar_bounds(area, window_region):
@@ -2565,10 +2633,8 @@ def _sidebar_bounds(area, window_region):
 def shelf_geometry(region):
     items = _enabled_items()
     top_margin, left_margin = _position(region)
-    show_fbx = _export_button_enabled()
-    total_slots = _total_slots(items)
     vertical = _is_vertical()
-    panel_w, panel_h = _panel_size(total_slots, vertical)
+    panel_w, panel_h = _panel_size(items, vertical)
     btn, pad = _btn_size(), _pad_size()
     # Anchored from the left/top edges now (not right), so the aux group
     # (orientation toggle + drag handle) sits at a fixed screen position and
@@ -2592,19 +2658,16 @@ def shelf_geometry(region):
         hi = max(lo, min(region.width, edge_right) - panel_w)
         x = max(lo, min(x, hi))
         y = max(0.0, min(y, max(0.0, region.height - panel_h)))
-    # FBX (when shown) takes slot 0. In vertical it's simply the topmost
-    # slot beyond the highest item index, so item rects need no shift; in
-    # horizontal, slot 0 is leftmost, so items shift right by one slot.
-    h_offset = 1 if (show_fbx and not vertical) else 0
-    if vertical:
-        # button 1 at the top of the stack, reading down
-        rects = [(x + pad, y + pad + (len(items) - 1 - i) * (btn + pad),
-                  x + pad + btn, y + pad + (len(items) - 1 - i) * (btn + pad) + btn)
-                 for i in range(len(items))]
-    else:
-        rects = [(x + pad + (i + h_offset) * (btn + pad), y + pad,
-                  x + pad + (i + h_offset) * (btn + pad) + btn, y + pad + btn)
-                 for i in range(len(items))]
+    rects = []
+    off = pad
+    for size in _slot_sizes(items)[:len(items)]:
+        if vertical:
+            # button 1 at the top of the stack, reading down
+            top = y + panel_h - off
+            rects.append((x + pad, top - size, x + pad + btn, top))
+        else:
+            rects.append((x + off, y + pad, x + off + size, y + pad + btn))
+        off += size + pad
     return x, y, panel_w, panel_h, rects
 
 
@@ -2631,18 +2694,6 @@ def _min_top_margin():
     # or those buttons clip off the top of the viewport. Callers assign this
     # straight into an IntProperty, hence round().
     return round(_aux_reserve()) if _is_vertical() else 0
-
-
-def fbx_button_rect(region):
-    # FBX's pseudo-slot: slot 0 inside the panel (leftmost horizontal, or
-    # the topmost slot above the highest item index vertically).
-    x, y, panel_w, panel_h, _ = shelf_geometry(region)
-    btn, pad = _btn_size(), _pad_size()
-    if _is_vertical():
-        n_items = len(_enabled_items())
-        y0 = y + pad + n_items * (btn + pad)
-        return x + pad, y0, x + pad + btn, y0 + btn
-    return x + pad, y + pad, x + pad + btn, y + pad + btn
 
 
 def _aux_group_rects(region):
@@ -2888,16 +2939,17 @@ def _draw_tooltip(shader, region, text, mx, my):
     blf.draw(font_id, text)
 
 
-def _draw_separator_bar(shader, x0, y0, x1, y1, color):
-    # a thin divider centered in its slot, perpendicular to the shelf's
-    # layout direction -- the slot's own empty space around it is what
-    # reads as "small margins", no separate narrow-slot geometry needed.
+def _draw_separator_bar(shader, x0, y0, x1, y1, color, short=False):
+    # a thin divider centered in its (narrow) slot, perpendicular to the
+    # shelf's layout direction. Also reused at full button size for the
+    # ghost of a separator being moved. `short` marks a collapsed separator.
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    ratio = 0.3 if short else 0.6
     if _is_vertical():
-        bar_w = (x1 - x0) * 0.6
+        bar_w = (x1 - x0) * ratio
         _round_quad(shader, cx - bar_w / 2.0, cy - 1.5, cx + bar_w / 2.0, cy + 1.5, color, 1.5)
     else:
-        bar_h = (y1 - y0) * 0.6
+        bar_h = (y1 - y0) * ratio
         _round_quad(shader, cx - 1.5, cy - bar_h / 2.0, cx + 1.5, cy + bar_h / 2.0, color, 1.5)
 
 
@@ -2914,8 +2966,6 @@ def draw_shelf():
     here = area is not None and area.as_pointer() == _active_area_ptr
     hover_index = _hover_index if here else None
     pressed_index = _pressed_index if here else None
-    export_hover = _export_hover and here
-    export_pressed = _export_pressed and here
     orient_hover = _orient_hover and here
     drag_hover = _drag_hover and here
     dragging = _dragging_shelf and here
@@ -2930,7 +2980,6 @@ def draw_shelf():
     prefs = get_prefs()
     bg_color = tuple(prefs.bg_color) if prefs else DEFAULT_BG_COLOR
     btn_normal, btn_hover, btn_pressed = _button_colors()
-    show_export_button = _export_button_enabled()
     icon_color = (1.0, 1.0, 1.0, prefs.icon_opacity if prefs else 1.0)
 
     rects = []
@@ -2955,9 +3004,11 @@ def draw_shelf():
                 continue
             if btn.is_separator:
                 if i == pressed_index or i == hover_index:
-                    _round_quad(color_shader, x0, y0, x1, y1, (1.0, 1.0, 1.0, 0.12), BTN_RADIUS)
+                    hx0, hy0, hx1, hy1 = _hit_rect((x0, y0, x1, y1), btn)
+                    _round_quad(color_shader, hx0, hy0, hx1, hy1, (1.0, 1.0, 1.0, 0.12), BTN_RADIUS)
                 _draw_separator_bar(color_shader, x0, y0, x1, y1,
-                                     tuple(prefs.separator_color) if prefs else (1.0, 1.0, 1.0, 0.4))
+                                     tuple(prefs.separator_color) if prefs else (1.0, 1.0, 1.0, 0.4),
+                                     short=btn.collapsed)
                 continue
             if i == pressed_index:
                 bg = btn_pressed
@@ -3023,18 +3074,6 @@ def draw_shelf():
                     else:
                         sep_x = (rects[g - 1][2] + rects[g][0]) / 2.0
                     _round_quad(color_shader, sep_x - 1.5, rects[0][1], sep_x + 1.5, rects[0][3], sep_color, 1.5)
-
-        if show_export_button:
-            ex0, ey0, ex1, ey1 = fbx_button_rect(region)
-            if export_pressed:
-                ebg = btn_pressed
-            elif export_hover:
-                ebg = btn_hover
-            else:
-                ebg = btn_normal
-            _round_quad(color_shader, ex0, ey0, ex1, ey1, ebg, BTN_RADIUS)
-            if export_pressed:
-                _border(color_shader, ex0, ey0, ex1, ey1, PRESSED_BORDER)
 
     if draw_panel:
         ox0, oy0, ox1, oy1 = orientation_button_rect(region)
@@ -3111,22 +3150,11 @@ def draw_shelf():
                 blf.position(font_id, x_pos, y_pos, 0)
                 blf.draw(font_id, line)
 
-    if draw_panel and show_export_button:
-        ex0, ey0, ex1, ey1 = fbx_button_rect(region)
-        blf.color(font_id, 1, 1, 1, 0.9)
-        blf.size(font_id, 9)
-        blf.position(font_id, ex0 + 3, ey1 - 16, 0)
-        blf.draw(font_id, "FBX")
-        blf.position(font_id, ex0 + 3, ey0 + 6, 0)
-        blf.draw(font_id, "sel")
-
     tooltip_text = None
     if moving_here and here:
         tooltip_text = "Click to drop here, right-click/Esc to cancel"
     elif hover_index is not None and 0 <= hover_index < len(items):
         tooltip_text = items[hover_index].label
-    elif export_hover and show_export_button:
-        tooltip_text = "Export Selected to FBX"
     elif orient_hover:
         tooltip_text = ("Click: switch to Horizontal" if _is_vertical()
                          else "Click: switch to Vertical")
@@ -3164,8 +3192,6 @@ _last_alive = 0.0  # time.time() of the last modal() call, any event -- a
                     # above (see _restart_requested) -- both are needed.
 _hover_index = None
 _pressed_index = None
-_export_hover = False
-_export_pressed = False
 _orient_hover = False
 _drag_hover = False
 _dragging_shelf = False
@@ -3219,13 +3245,13 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
 
     def modal(self, context, event):
         global _modal_running, _hover_index, _pressed_index, _mouse_x, _mouse_y
-        global _export_hover, _export_pressed, _orient_hover, _drag_hover
+        global _orient_hover, _drag_hover
         global _dragging_shelf, _drag_start_mouse, _drag_start_abs, _drag_start_margins
         global _drag_live_margins, _drag_region_width, _drag_target
         global _last_alive, _restart_requested
         global _resize_hover, _resizing_shelf, _resize_origin, _resize_start_dist, _resize_start_scale
         global _moving_index, _move_insert_gap
-        global _pending_export_selection, _active_target, _active_area_ptr
+        global _active_target, _active_area_ptr
         _last_alive = time.time()  # proof of life, independent of _modal_running
         if _modal_stop or _restart_requested:
             _modal_running = False
@@ -3280,20 +3306,13 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
 
             new_hover = None
             new_resize_hover = False
-            new_export_hover = False
             new_orient_hover = False
             new_drag_hover = False
             if area is not None:
                 _mouse_x, _mouse_y = mx, my
                 if _should_draw_shelf():
                     _, _, _, _, rects = shelf_geometry(region)
-                    for i, (x0, y0, x1, y1) in enumerate(rects):
-                        if x0 <= mx <= x1 and y0 <= my <= y1:
-                            new_hover = i
-                            break
-                    if _export_button_enabled():
-                        ex0, ey0, ex1, ey1 = fbx_button_rect(region)
-                        new_export_hover = ex0 <= mx <= ex1 and ey0 <= my <= ey1
+                    new_hover = _slot_at(rects, _enabled_items(), mx, my)
                     ox0, oy0, ox1, oy1 = orientation_button_rect(region)
                     new_orient_hover = ox0 <= mx <= ox1 and oy0 <= my <= oy1
                     gx0, gy0, gx1, gy1 = drag_handle_rect(region)
@@ -3304,12 +3323,11 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
                         new_hover = None
             # redraw on any state change, and continuously while hovering so
             # the tooltip box tracks the cursor
-            should_redraw = (new_hover != _hover_index or new_export_hover != _export_hover
+            should_redraw = (new_hover != _hover_index
                               or new_orient_hover != _orient_hover or new_drag_hover != _drag_hover
                               or new_resize_hover != _resize_hover
-                              or new_hover is not None or new_export_hover or new_orient_hover or new_drag_hover)
+                              or new_hover is not None or new_orient_hover or new_drag_hover)
             _hover_index = new_hover
-            _export_hover = new_export_hover
             _orient_hover = new_orient_hover
             _drag_hover = new_drag_hover
             _resize_hover = new_resize_hover
@@ -3335,21 +3353,21 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
         if event.type == 'RIGHTMOUSE' and event.value == 'PRESS' and area is not None:
             if _should_draw_shelf():
                 _, _, _, _, rects = shelf_geometry(region)
-                for i, (x0, y0, x1, y1) in enumerate(rects):
-                    if x0 <= mx <= x1 and y0 <= my <= y1:
-                        prefs = get_prefs()
-                        coll, idx_attr = _target_collection(prefs, _active_target)
-                        real_indices = _visible_real_indices(coll)
-                        if i < len(real_indices):
-                            setattr(prefs, idx_attr, real_indices[i])
-                            # explicit INVOKE_DEFAULT -- called from a script/
-                            # modal context (not a real UI button click), so
-                            # without it every operator drawn inside the menu
-                            # (Delete's own invoke_confirm included) silently
-                            # runs EXEC-only and skips its invoke()/dialog.
-                            with context.temp_override(window=context.window, area=area, region=region):
-                                bpy.ops.wm.call_menu('INVOKE_DEFAULT', name="EASYSHELF_MT_shelf_button_context")
-                        return {'RUNNING_MODAL'}
+                i = _slot_at(rects, _enabled_items(), mx, my)
+                if i is not None:
+                    prefs = get_prefs()
+                    coll, idx_attr = _target_collection(prefs, _active_target)
+                    real_indices = _visible_real_indices(coll)
+                    if i < len(real_indices):
+                        setattr(prefs, idx_attr, real_indices[i])
+                        # explicit INVOKE_DEFAULT -- called from a script/
+                        # modal context (not a real UI button click), so
+                        # without it every operator drawn inside the menu
+                        # (Delete's own invoke_confirm included) silently
+                        # runs EXEC-only and skips its invoke()/dialog.
+                        with context.temp_override(window=context.window, area=area, region=region):
+                            bpy.ops.wm.call_menu('INVOKE_DEFAULT', name="EASYSHELF_MT_shelf_button_context")
+                    return {'RUNNING_MODAL'}
             return {'PASS_THROUGH'}
 
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and area is not None:
@@ -3364,33 +3382,22 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
                     _resize_start_scale = get_prefs().shelf_scale
                     _tag_viewports_redraw()
                     return {'RUNNING_MODAL'}
-                for i, (x0, y0, x1, y1) in enumerate(rects):
-                    if x0 <= mx <= x1 and y0 <= my <= y1:
-                        _pressed_index = i
-                        btn = items[i]
-                        if btn.command:
-                            try:
-                                # the command must run in the editor it was clicked in
-                                # (bpy.ops.uv.* / node.* poll on the area type)
-                                with context.temp_override(window=context.window, area=area, region=region):
-                                    _exec_shelf_command(btn.command)
-                            except Exception as e:
-                                self.report({'ERROR'}, f"Shelf button {i + 1} ({btn.label}) failed: {e}")
-                        _tag_viewports_redraw()
-                        return {'RUNNING_MODAL'}
-
-                if _export_button_enabled():
-                    ex0, ey0, ex1, ey1 = fbx_button_rect(region)
-                    if ex0 <= mx <= ex1 and ey0 <= my <= ey1:
-                        _export_pressed = True
+                i = _slot_at(rects, items, mx, my)
+                if i is not None:
+                    _pressed_index = i
+                    btn = items[i]
+                    if btn.is_separator:
+                        btn.collapsed = not btn.collapsed  # update= saves the config
+                    if btn.command:
                         try:
-                            _pending_export_selection = [o.name for o in context.selected_objects]
+                            # the command must run in the editor it was clicked in
+                            # (bpy.ops.uv.* / node.* poll on the area type)
                             with context.temp_override(window=context.window, area=area, region=region):
-                                bpy.ops.export_scene.fbx('INVOKE_DEFAULT', use_selection=True)
+                                _exec_shelf_command(btn.command)
                         except Exception as e:
-                            self.report({'ERROR'}, f"Export FBX failed: {e}")
-                        _tag_viewports_redraw()
-                        return {'RUNNING_MODAL'}
+                            self.report({'ERROR'}, f"Shelf button {i + 1} ({btn.label}) failed: {e}")
+                    _tag_viewports_redraw()
+                    return {'RUNNING_MODAL'}
 
                 ox0, oy0, ox1, oy1 = orientation_button_rect(region)
                 if ox0 <= mx <= ox1 and oy0 <= my <= oy1:
@@ -3398,6 +3405,11 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
                     if prefs is not None:
                         p = _placement(prefs, _active_target)
                         p.orientation = 'HORIZONTAL' if p.orientation == 'VERTICAL' else 'VERTICAL'
+                        # pivot on the toggle: shift the shelf so the button stays under the cursor.
+                        # ponytail: near a viewport edge geometry clamps, so the button may still shift a little.
+                        nx0, ny0, nx1, ny1 = orientation_button_rect(region)
+                        p.left_margin_pct = max(0.0, min(1.0, p.left_margin_pct + ((ox0 + ox1) - (nx0 + nx1)) / 2.0 / region.width))
+                        p.top_margin = max(0, round(p.top_margin - ((oy0 + oy1) - (ny0 + ny1)) / 2.0))
                     _tag_viewports_redraw()
                     return {'RUNNING_MODAL'}
 
@@ -3435,9 +3447,8 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
             return {'PASS_THROUGH'}
 
         if event.type == 'LEFTMOUSE' and event.value == 'RELEASE' and (
-                _pressed_index is not None or _export_pressed):
+                _pressed_index is not None):
             _pressed_index = None
-            _export_pressed = False
             _tag_viewports_redraw()
             return {'PASS_THROUGH'}
 
@@ -3632,7 +3643,7 @@ def register():
 
 def unregister():
     global _modal_stop, _hover_index, _pressed_index, _drag_target, _active_area_ptr
-    global _export_hover, _export_pressed, _icon_previews
+    global _icon_previews
     global _orient_hover, _drag_hover, _dragging_shelf, _drag_live_margins
     global _resize_hover, _resizing_shelf
     global _moving_index, _move_insert_gap
@@ -3642,8 +3653,6 @@ def unregister():
     _script_watch.clear()
     _hover_index = None
     _pressed_index = None
-    _export_hover = False
-    _export_pressed = False
     _orient_hover = False
     _drag_hover = False
     _dragging_shelf = False

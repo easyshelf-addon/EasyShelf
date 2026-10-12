@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "easy_shelf"
-version = "0.3.0"
+version = "0.3.2"
 name = "EasyShelf"
 tagline = "Customizable quick-access button shelf for any workflow"
 maintainer = "DenisZakharov"
@@ -18,4 +18,4 @@ license = [
 blender_version_min = "4.2.0"
 
 [permissions]
-files = "Export and import settings and scripts"
+files = "Export/import settings, run user scripts from a cache"

@@ -628,3 +628,10 @@ footer {
 .connect-grid { display: grid; grid-template-columns: 1fr 1.6fr; gap: 3rem; align-items: start; }
 #support .cta { display: flex; justify-content: center; margin-top: 0.75rem; }
 @media (max-width: 720px) { .connect-grid { grid-template-columns: 1fr; gap: 2.5rem; } }
+
+.move-banner { background: var(--bg-elevated-2); border-bottom: 1px solid var(--accent); padding: 10px 0; }
+.move-banner .wrap { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; }
+.move-banner p { margin: 0; flex: 1 1 320px; color: var(--text); }
+.move-banner strong { color: var(--accent); }
+.legacy-dl { margin: 12px 0 0; font-size: 0.85rem; }
+#move p { margin: 0 0 12px; }
