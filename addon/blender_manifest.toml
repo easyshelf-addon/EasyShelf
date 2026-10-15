@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "easy_shelf"
-version = "0.3.2"
+version = "0.3.4"
 name = "EasyShelf"
 tagline = "Customizable quick-access button shelf for any workflow"
 maintainer = "DenisZakharov"
@@ -9,7 +9,7 @@ type = "add-on"
 
 website = "https://easyshelf-addon.github.io/EasyShelf/"
 
-tags = ["3D View", "User Interface"]
+tags = ["3D View", "Modeling", "User Interface"]
 
 license = [
   "SPDX:GPL-3.0-or-later",

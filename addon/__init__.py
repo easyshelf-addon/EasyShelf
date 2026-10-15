@@ -4,7 +4,7 @@
 # bl_info directly hits "NameError: name 'bl_info' is not defined" on
 # reinstall/reload. Capture what we need into a plain constant right here,
 # while bl_info still exists, and use this everywhere else instead.
-ADDON_VERSION = (0, 3, 2)
+ADDON_VERSION = (0, 3, 4)
 
 import os
 import re
@@ -748,6 +748,64 @@ def _tag_viewports_redraw():
                 area.tag_redraw()
 
 
+_shelf_hidden = False   # session-only on purpose: a shelf that stays hidden after a restart would look like a broken add-on
+
+
+class EASYSHELF_OT_toggle_shelf(bpy.types.Operator):
+    """Show or hide the shelf in every editor (assign a key in the add-on preferences)"""
+    bl_idname = "easy_shelf.toggle_shelf"
+    bl_label = "Show/Hide Shelf"
+
+    def execute(self, context):
+        global _shelf_hidden
+        _shelf_hidden = not _shelf_hidden
+        _tag_viewports_redraw()
+        self.report({'INFO'}, "Shelf hidden" if _shelf_hidden else "Shelf shown")
+        return {'FINISHED'}
+
+
+_OPPOSITE_PLACEMENT = {'ABOVE': 'BELOW', 'BELOW': 'ABOVE', 'LEFT': 'RIGHT', 'RIGHT': 'LEFT'}
+
+
+def _fit_label_placement(placement, rects, items, region, font_id, line_h):
+    """Outside labels flip to the opposite side when they would leave the region
+    near an edge. Decided once for the whole shelf (labels don't jump around
+    mid-row) and only for drawing: the saved preference is never touched.
+    Stays put when neither side has room."""
+    other = _OPPOSITE_PLACEMENT.get(placement)
+    if other is None:
+        return placement
+    # with Region Overlap the toolbar (T) and sidebar (N) are drawn over the left and
+    # right of this region, so what they cover is not free space either
+    left_inset = right_inset = 0
+    area = bpy.context.area
+    if area is not None and bpy.context.preferences.system.use_region_overlap:
+        for r in area.regions:
+            if r.type in ('TOOLS', 'UI') and r.width > 1:
+                if r.alignment == 'LEFT':
+                    left_inset += r.width
+                elif r.alignment == 'RIGHT':
+                    right_inset += r.width
+
+    def fits(side):
+        for (x0, y0, x1, y1), it in zip(rects, items):
+            if it.is_separator:
+                continue
+            lines = _wrap_label(font_id, it.label, (x1 - x0) - 4)
+            if side == 'ABOVE' and y1 + 2 + len(lines) * line_h > region.height:
+                return False
+            if side == 'BELOW' and y0 - 2 - len(lines) * line_h < 0:
+                return False
+            width = max((blf.dimensions(font_id, ln)[0] for ln in lines), default=0)
+            if side == 'LEFT' and x0 - 2 - width < left_inset:
+                return False
+            if side == 'RIGHT' and x1 + 2 + width > region.width - right_inset:
+                return False
+        return True
+
+    return other if not fits(placement) and fits(other) else placement
+
+
 def _find_region(area_type='VIEW_3D'):
     for window in bpy.context.window_manager.windows:
         for area in window.screen.areas:
@@ -796,6 +854,7 @@ def _register_keymap():
         kmi = km.keymap_items.new('wm.call_menu_pie', 'NONE', 'PRESS')
         kmi.properties.name = EASYSHELF_MT_pie.bl_idname
         addon_keymaps.append((km, kmi))
+        addon_keymaps.append((km, km.keymap_items.new(EASYSHELF_OT_toggle_shelf.bl_idname, 'NONE', 'PRESS')))
 
 
 def _unregister_keymap():
@@ -835,7 +894,7 @@ def _pie_hotkey_assigned(area_type='VIEW_3D'):
 
 
 def _should_draw_shelf():
-    if _active_target is None:
+    if _active_target is None or _shelf_hidden:
         return False
     prefs = get_prefs()
     mode = _context_entry(prefs, _active_target).display_mode if prefs else 'BOTH'
@@ -1721,6 +1780,8 @@ class EASYSHELF_OT_pref_preset_position(bpy.types.Operator):
         if region is None:
             self.report({'WARNING'}, f"No {label} area is open to measure -- open one and try again")
             return {'CANCELLED'}
+        global _shelf_hidden
+        _shelf_hidden = False  # Reset Position also brings back a shelf hidden with the Show/Hide hotkey
         prefs = get_prefs()
         _center_shelf_position(prefs, region, self.target)
         _tag_viewports_redraw()
@@ -1914,7 +1975,9 @@ def _draw_pie_page(pie, context, page):
         pie.label(text=f"Pie menu is off for {_TARGET_LABELS[target]} (set Shelf + Pie in its settings)", icon='INFO')
         return
     coll, _ = _target_collection(prefs, target)
-    items = [(i, b) for i, b in enumerate(coll) if b.enabled and b.show_in_pie]
+    # separators are not buttons: they get no slot and no number; buttons are
+    # numbered 1.. in order across the pie pages, same as on the shelf
+    items = list(enumerate(b for b in coll if b.enabled and b.show_in_pie and not b.is_separator))
     if not items:
         pie.label(text="Not configured yet", icon='INFO')
         return
@@ -2053,7 +2116,7 @@ class EasyShelfPreferences(bpy.types.AddonPreferences):
         # Boxed + labeled so it reads as a separate group from the per-context
         # shelf settings below, instead of blending into the same visual block.
         general_box = layout.box()
-        general_box.label(text="Backup & Updates")
+        general_box.label(text="Backup" if EDITION == "easyshelf" else "Backup & Updates")  # no update controls in the Extensions edition
         row = general_box.row(align=True)
         row.operator("easy_shelf.export_settings", icon='EXPORT')
         row.operator("easy_shelf.import_settings", icon='IMPORT')
@@ -2114,18 +2177,21 @@ class EasyShelfPreferences(bpy.types.AddonPreferences):
                 hk_box.label(text=f"Pie Menu Hotkey ({_KEYMAP_FOR_AREA[area_type]})"
                                   + (f" -- shared with {', '.join(shared)}" if shared else ""))
                 _draw_pie_hotkey(hk_box, context, _KEYMAP_FOR_AREA[area_type])
+            tg_box = layout.box()
+            tg_box.label(text=f"Show/Hide Shelf Hotkey ({_KEYMAP_FOR_AREA[_CONTEXTS[target][2]]})")
+            _draw_pie_hotkey(tg_box, context, _KEYMAP_FOR_AREA[_CONTEXTS[target][2]], EASYSHELF_OT_toggle_shelf.bl_idname)
             layout.label(text=f"{label} buttons -- order determines button 1..N:")
             _draw_button_list(layout, self, target)
 
 
-def _draw_pie_hotkey(layout, context, keymap_name):
+def _draw_pie_hotkey(layout, context, keymap_name, idname='wm.call_menu_pie'):
     wm = context.window_manager
     kc = wm.keyconfigs.user
     km = kc.keymaps.get(keymap_name) if kc else None
     found_kmi = None
     if km:
         for kmi in km.keymap_items:
-            if kmi.idname == 'wm.call_menu_pie' and kmi.properties.name == EASYSHELF_MT_pie.bl_idname:
+            if kmi.idname == idname and (idname != 'wm.call_menu_pie' or kmi.properties.name == EASYSHELF_MT_pie.bl_idname):
                 found_kmi = kmi
                 break
     if found_kmi:
@@ -3109,11 +3175,15 @@ def draw_shelf():
     if show_number:
         blf.color(font_id, 1, 1, 1, 0.9)
         blf.size(font_id, 11)
+        number = 0  # separators don't count, so buttons read 1, 2, 3.. across them
         for i, (x0, y0, x1, y1) in enumerate(rects):
-            if i == moving_slot_i or items[i].is_separator:
+            if items[i].is_separator:
+                continue
+            number += 1
+            if i == moving_slot_i:
                 continue
             blf.position(font_id, x0 + 2, y1 - 13, 0)
-            blf.draw(font_id, str(i + 1))
+            blf.draw(font_id, str(number))
 
     if show_label:
         label_font_size = prefs.label_font_size if prefs else 7
@@ -3124,6 +3194,7 @@ def draw_shelf():
         blf.size(font_id, label_font_size)
         blf.color(font_id, *label_color)
         line_h = label_font_size + 2
+        label_placement = _fit_label_placement(label_placement, rects, items, region, font_id, line_h)
         for i, (x0, y0, x1, y1) in enumerate(rects):
             if i == moving_slot_i or items[i].is_separator:
                 continue
@@ -3395,7 +3466,7 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
                             with context.temp_override(window=context.window, area=area, region=region):
                                 _exec_shelf_command(btn.command)
                         except Exception as e:
-                            self.report({'ERROR'}, f"Shelf button {i + 1} ({btn.label}) failed: {e}")
+                            self.report({'ERROR'}, f"Shelf button {sum(not b.is_separator for b in items[:i + 1])} ({btn.label}) failed: {e}")
                     _tag_viewports_redraw()
                     return {'RUNNING_MODAL'}
 
@@ -3561,6 +3632,7 @@ classes = (
     EASYSHELF_OT_pref_move,
     EASYSHELF_OT_start_move_button,
     EASYSHELF_OT_add_separator,
+    EASYSHELF_OT_toggle_shelf,
     EASYSHELF_MT_shelf_button_context,
     EASYSHELF_OT_copy_button,
     EASYSHELF_OT_edit_script,
@@ -3582,7 +3654,8 @@ classes = (
 
 
 def register():
-    global _modal_stop, _icon_previews, _last_alive, _last_screen_ptr, _restart_requested
+    global _modal_stop, _icon_previews, _last_alive, _last_screen_ptr, _restart_requested, _shelf_hidden
+    _shelf_hidden = False
     _icon_previews = bpy.utils.previews.new()
     for cls in classes:
         try:
