@@ -4,7 +4,7 @@
 # bl_info directly hits "NameError: name 'bl_info' is not defined" on
 # reinstall/reload. Capture what we need into a plain constant right here,
 # while bl_info still exists, and use this everywhere else instead.
-ADDON_VERSION = (0, 3, 4)
+ADDON_VERSION = (0, 3, 5)
 
 import os
 import re
@@ -1367,6 +1367,7 @@ class EASYSHELF_OT_start_move_button(bpy.types.Operator):
         _moving_index = getattr(prefs, idx_attr)
         _move_insert_gap = None
         _tag_viewports_redraw()
+        _start_move_modal()
         return {'FINISHED'}
 
 
@@ -1390,6 +1391,7 @@ class EASYSHELF_OT_add_separator(bpy.types.Operator):
         _move_insert_gap = None
         _save_prefs()
         _tag_viewports_redraw()
+        _start_move_modal()
         return {'FINISHED'}
 
 
@@ -3240,27 +3242,7 @@ def draw_shelf():
 _draw_handles = []  # (space class, handle)
 _modal_running = False
 _modal_stop = False
-_restart_requested = False  # like _modal_stop but for a live restart, not
-                             # addon shutdown -- see _start_modal(). Confirmed
-                             # live (patched modal() to log every event that
-                             # reached it): after switching workspace tabs,
-                             # the running instance keeps getting its own
-                             # TIMER events forever (with context.area/region
-                             # both None) but NEVER another MOUSEMOVE/click
-                             # again -- a zombie that looks alive by any
-                             # heartbeat, since it's still ticking, but is
-                             # permanently cut off from real input. Only a
-                             # clean cancel + fresh INVOKE_DEFAULT (bound to
-                             # the now-current window/area) fixes it.
-_last_alive = 0.0  # time.time() of the last modal() call, any event -- a
-                    # heartbeat independent of _modal_running, which has
-                    # proven unreliable: it's only ever cleared from inside
-                    # modal() itself, so if the instance gets silently
-                    # orphaned by Blender instead of going through our own
-                    # _modal_stop shutdown, the flag stays stuck "running"
-                    # forever with nothing left alive to ever clear it. Only
-                    # catches a truly dead instance, not the zombie case
-                    # above (see _restart_requested) -- both are needed.
+_last_alive = 0.0  # time.time() of the last move-mode modal() call: heartbeat for _modal_is_alive()
 _hover_index = None
 _pressed_index = None
 _orient_hover = False
@@ -3281,16 +3263,13 @@ _moving_target = None  # context target whose list `_moving_index` indexes
 _drag_region_width = 1.0  # region.width captured at drag-start, for px<->fraction conversion
 _mouse_x = 0
 _mouse_y = 0
-_last_screen_ptr = None  # win.screen.as_pointer() as of the last _start_modal
-                          # tick, to detect a workspace-tab switch and force
-                          # a clean restart -- see _restart_requested above.
 
 _moving_index = None  # real prefs.buttons index of the button being moved, or None
 _move_insert_gap = None  # 0..N gap position (in _enabled_items() order) under the cursor while moving
 
 
 # ---------------------------------------------------------------------------
-# Click handling -- a single persistent modal operator, started on register
+# Click handling -- see the gizmo below; the modal operator is move mode only
 # ---------------------------------------------------------------------------
 
 def _area_under_mouse(context, event):
@@ -3311,102 +3290,53 @@ def _area_under_mouse(context, event):
 
 
 class EASYSHELF_OT_modal(bpy.types.Operator):
+    """Move mode only: the button follows the cursor until the next click.
+    Runs just while a move is in progress; everything else (hover, clicks,
+    drag, resize) goes through the gizmo below, so no operator stays resident
+    (a resident modal operator blocks Blender's autosave)."""
     bl_idname = "easy_shelf.modal"
-    bl_label = "EasyShelf Input"
+    bl_label = "Shelf Move Mode"
+
+    def _end(self, context):
+        global _modal_running
+        _modal_running = False
+        try:
+            context.window_manager.event_timer_remove(self._timer)
+        except Exception:
+            pass
+        return {'FINISHED'}
 
     def modal(self, context, event):
-        global _modal_running, _hover_index, _pressed_index, _mouse_x, _mouse_y
-        global _orient_hover, _drag_hover
-        global _dragging_shelf, _drag_start_mouse, _drag_start_abs, _drag_start_margins
-        global _drag_live_margins, _drag_region_width, _drag_target
-        global _last_alive, _restart_requested
-        global _resize_hover, _resizing_shelf, _resize_origin, _resize_start_dist, _resize_start_scale
-        global _moving_index, _move_insert_gap
-        global _active_target, _active_area_ptr
-        _last_alive = time.time()  # proof of life, independent of _modal_running
-        if _modal_stop or _restart_requested:
-            _modal_running = False
-            _restart_requested = False
-            try:
-                context.window_manager.event_timer_remove(self._timer)
-            except Exception:
-                pass
-            return {'CANCELLED'}
+        global _moving_index, _move_insert_gap, _mouse_x, _mouse_y
+        global _last_alive, _active_target, _active_area_ptr
+        _last_alive = time.time()
+        if _modal_stop or _moving_index is None:
+            return self._end(context)
 
         area, region, mx, my = _area_under_mouse(context, event)
-        if not _dragging_shelf:  # a drag keeps owning its area/target wherever the cursor goes
-            if area is not None:
-                _sync_active_target(area, context.mode)
-                _active_area_ptr = area.as_pointer()
-            else:
-                _active_target = None
-                _active_area_ptr = None
+        if area is not None:
+            _sync_active_target(area, context.mode)
+            _active_area_ptr = area.as_pointer()
+        else:
+            _active_target = None
+            _active_area_ptr = None
 
-        if _moving_index is not None and event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+        if event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
             _moving_index = None
             _move_insert_gap = None
             _tag_viewports_redraw()
-            return {'RUNNING_MODAL'}
+            return self._end(context)
 
         if event.type == 'MOUSEMOVE':
-            if _moving_index is not None:
-                if area is not None:
-                    _mouse_x, _mouse_y = mx, my
-                    if _active_target == _moving_target and _should_draw_shelf():
-                        _, _, _, _, rects = shelf_geometry(region)
-                        _move_insert_gap = _gap_under_mouse(rects, mx, my, _is_vertical())
-                _tag_viewports_redraw()
-                return {'RUNNING_MODAL'}  # consume it -- don't hover/orbit while moving
-
-            if _dragging_shelf:
-                dx = event.mouse_x - _drag_start_abs[0]
-                dy = event.mouse_y - _drag_start_abs[1]
-                _mouse_x, _mouse_y = _drag_start_mouse[0] + dx, _drag_start_mouse[1] + dy
-                start_top, start_left = _drag_start_margins
-                _drag_live_margins = (max(0.0, start_top - dy), max(0.0, start_left + dx))
-                _tag_viewports_redraw()
-                return {'RUNNING_MODAL'}  # consume the drag, don't also orbit/pan the viewport
-
-            if _resizing_shelf:
-                prefs = get_prefs()
-                if prefs is not None and area is not None:
-                    d = math.hypot(mx - _resize_origin[0], my - _resize_origin[1])
-                    prefs.shelf_scale = max(0.5, min(3.0, _resize_start_scale * d / _resize_start_dist))
-                _tag_viewports_redraw()
-                return {'RUNNING_MODAL'}
-
-            new_hover = None
-            new_resize_hover = False
-            new_orient_hover = False
-            new_drag_hover = False
             if area is not None:
                 _mouse_x, _mouse_y = mx, my
-                if _should_draw_shelf():
+                if _active_target == _moving_target and _should_draw_shelf():
                     _, _, _, _, rects = shelf_geometry(region)
-                    new_hover = _slot_at(rects, _enabled_items(), mx, my)
-                    ox0, oy0, ox1, oy1 = orientation_button_rect(region)
-                    new_orient_hover = ox0 <= mx <= ox1 and oy0 <= my <= oy1
-                    gx0, gy0, gx1, gy1 = drag_handle_rect(region)
-                    new_drag_hover = gx0 <= mx <= gx1 and gy0 <= my <= gy1
-                    rx0, ry0, rx1, ry1 = resize_corner_rect(region)
-                    new_resize_hover = rx0 <= mx <= rx1 and ry0 <= my <= ry1
-                    if new_resize_hover:
-                        new_hover = None
-            # redraw on any state change, and continuously while hovering so
-            # the tooltip box tracks the cursor
-            should_redraw = (new_hover != _hover_index
-                              or new_orient_hover != _orient_hover or new_drag_hover != _drag_hover
-                              or new_resize_hover != _resize_hover
-                              or new_hover is not None or new_orient_hover or new_drag_hover)
-            _hover_index = new_hover
-            _orient_hover = new_orient_hover
-            _drag_hover = new_drag_hover
-            _resize_hover = new_resize_hover
-            if should_redraw:
-                _tag_viewports_redraw()  # all shelf areas: the previously-hovered one must clear too
-            return {'PASS_THROUGH'}
+                    _move_insert_gap = _gap_under_mouse(rects, mx, my, _is_vertical())
+            _tag_viewports_redraw()
+            return {'RUNNING_MODAL'}  # consume it -- don't hover/orbit while moving
 
-        if _moving_index is not None and event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
             prefs = get_prefs()
             if prefs is not None and _move_insert_gap is not None:
                 coll, idx_attr = _target_collection(prefs, _moving_target)
@@ -3419,120 +3349,15 @@ class EASYSHELF_OT_modal(bpy.types.Operator):
             _moving_index = None
             _move_insert_gap = None
             _tag_viewports_redraw()
-            return {'RUNNING_MODAL'}
-
-        if event.type == 'RIGHTMOUSE' and event.value == 'PRESS' and area is not None:
-            if _should_draw_shelf():
-                _, _, _, _, rects = shelf_geometry(region)
-                i = _slot_at(rects, _enabled_items(), mx, my)
-                if i is not None:
-                    prefs = get_prefs()
-                    coll, idx_attr = _target_collection(prefs, _active_target)
-                    real_indices = _visible_real_indices(coll)
-                    if i < len(real_indices):
-                        setattr(prefs, idx_attr, real_indices[i])
-                        # explicit INVOKE_DEFAULT -- called from a script/
-                        # modal context (not a real UI button click), so
-                        # without it every operator drawn inside the menu
-                        # (Delete's own invoke_confirm included) silently
-                        # runs EXEC-only and skips its invoke()/dialog.
-                        with context.temp_override(window=context.window, area=area, region=region):
-                            bpy.ops.wm.call_menu('INVOKE_DEFAULT', name="EASYSHELF_MT_shelf_button_context")
-                    return {'RUNNING_MODAL'}
-            return {'PASS_THROUGH'}
-
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and area is not None:
-            if _should_draw_shelf():
-                items = _enabled_items()
-                x, y, panel_w, panel_h, rects = shelf_geometry(region)
-                rx0, ry0, rx1, ry1 = resize_corner_rect(region)
-                if rx0 <= mx <= rx1 and ry0 <= my <= ry1:
-                    _resizing_shelf = True
-                    _resize_origin = (x, y + panel_h)
-                    _resize_start_dist = max(1.0, math.hypot((rx0 if _is_vertical() else rx1) - x, ry0 - (y + panel_h)))
-                    _resize_start_scale = get_prefs().shelf_scale
-                    _tag_viewports_redraw()
-                    return {'RUNNING_MODAL'}
-                i = _slot_at(rects, items, mx, my)
-                if i is not None:
-                    _pressed_index = i
-                    btn = items[i]
-                    if btn.is_separator:
-                        btn.collapsed = not btn.collapsed  # update= saves the config
-                    if btn.command:
-                        try:
-                            # the command must run in the editor it was clicked in
-                            # (bpy.ops.uv.* / node.* poll on the area type)
-                            with context.temp_override(window=context.window, area=area, region=region):
-                                _exec_shelf_command(btn.command)
-                        except Exception as e:
-                            self.report({'ERROR'}, f"Shelf button {sum(not b.is_separator for b in items[:i + 1])} ({btn.label}) failed: {e}")
-                    _tag_viewports_redraw()
-                    return {'RUNNING_MODAL'}
-
-                ox0, oy0, ox1, oy1 = orientation_button_rect(region)
-                if ox0 <= mx <= ox1 and oy0 <= my <= oy1:
-                    prefs = get_prefs()
-                    if prefs is not None:
-                        p = _placement(prefs, _active_target)
-                        p.orientation = 'HORIZONTAL' if p.orientation == 'VERTICAL' else 'VERTICAL'
-                        # pivot on the toggle: shift the shelf so the button stays under the cursor.
-                        # ponytail: near a viewport edge geometry clamps, so the button may still shift a little.
-                        nx0, ny0, nx1, ny1 = orientation_button_rect(region)
-                        p.left_margin_pct = max(0.0, min(1.0, p.left_margin_pct + ((ox0 + ox1) - (nx0 + nx1)) / 2.0 / region.width))
-                        p.top_margin = max(0, round(p.top_margin - ((oy0 + oy1) - (ny0 + ny1)) / 2.0))
-                    _tag_viewports_redraw()
-                    return {'RUNNING_MODAL'}
-
-                gx0, gy0, gx1, gy1 = drag_handle_rect(region)
-                if gx0 <= mx <= gx1 and gy0 <= my <= gy1:
-                    _dragging_shelf = True
-                    _drag_target = _active_target
-                    _drag_start_mouse = (mx, my)
-                    _drag_start_abs = (event.mouse_x, event.mouse_y)
-                    _drag_region_width = region.width
-                    _drag_start_margins = _position(region)
-                    _drag_live_margins = _drag_start_margins
-                    _tag_viewports_redraw()
-                    return {'RUNNING_MODAL'}
-
-            return {'PASS_THROUGH'}
-
-        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE' and _resizing_shelf:
-            _resizing_shelf = False
-            _save_prefs()
-            _tag_viewports_redraw()
-            return {'RUNNING_MODAL'}
-
-        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE' and _dragging_shelf:
-            _dragging_shelf = False
-            prefs = get_prefs()
-            if prefs is not None and _drag_live_margins is not None and _drag_target is not None:
-                top, left_px = _drag_live_margins
-                p = _placement(prefs, _drag_target)
-                p.top_margin = round(top)  # IntProperty -- rejects a bare float
-                if _drag_region_width:
-                    p.left_margin_pct = max(0.0, min(1.0, left_px / _drag_region_width))
-            _drag_live_margins = None
-            _tag_viewports_redraw()
-            return {'PASS_THROUGH'}
-
-        if event.type == 'LEFTMOUSE' and event.value == 'RELEASE' and (
-                _pressed_index is not None):
-            _pressed_index = None
-            _tag_viewports_redraw()
-            return {'PASS_THROUGH'}
+            return self._end(context)
 
         return {'PASS_THROUGH'}
 
     def invoke(self, context, event):
         global _modal_running, _last_alive
         context.window_manager.modal_handler_add(self)
-        # Guarantees a steady stream of events even with the mouse idle, so
-        # the _modal_stop check above always gets a near-immediate chance to
-        # run -- without this, disabling the addon while the mouse hasn't
-        # moved could leave this instance alive when unregister_class() runs
-        # on its class, which crashes Blender.
+        # a steady event stream so an addon disable mid-move ends us promptly
+        # (unregister_class on a still-running modal crashes Blender)
         self._timer = context.window_manager.event_timer_add(0.1, window=context.window)
         _modal_running = True
         _last_alive = time.time()
@@ -3556,68 +3381,256 @@ def _unregister_modal_when_stopped():
     return None
 
 
-def _start_modal():
-    # a recurring watchdog, not a one-shot. Two distinct failure modes were
-    # found in the wild after switching workspace tabs:
-    #  1. the instance dies outright (rare) -- caught by the _last_alive
-    #     heartbeat below, independent of _modal_running (which is only ever
-    #     cleared from inside modal() itself, so a silently-orphaned instance
-    #     left it stuck "running" forever with nothing left alive to clear
-    #     it).
-    #  2. the instance survives as a *zombie* (the common case, confirmed by
-    #     temporarily patching modal() to log every event that reached it):
-    #     it keeps getting its own bound TIMER events forever (context.area/
-    #     region both None on them), so any heartbeat looks perfectly healthy,
-    #     but it never receives another MOUSEMOVE/click again -- permanently
-    #     cut off from real input. Only a clean cancel + fresh INVOKE_DEFAULT
-    #     fixes this, and nothing about the instance's own state reveals it's
-    #     a zombie; only a changed win.screen identity does.
-    global _modal_running, _last_screen_ptr, _restart_requested
-    if _modal_stop:
-        return None  # addon is unregistering -- stop watching for good
-    win = bpy.context.window
-    screen_ptr = win.screen.as_pointer() if win is not None else None
-    screen_changed = _last_screen_ptr is not None and screen_ptr != _last_screen_ptr
-    _last_screen_ptr = screen_ptr
-    if screen_changed and _modal_running:
-        # ask the (possibly zombied) instance to cancel; its own timer still
-        # fires every 0.1s even when zombied, so it will see this shortly --
-        # next tick will find _modal_running False and start a fresh one.
-        _restart_requested = True
-        return 0.15
+def _start_move_modal():
+    """Called right after an operator sets _moving_index."""
     if _modal_is_alive():
-        return 0.5
-    _modal_running = False
-    # unconditional and defensive: hasattr(bpy.types, "EASYSHELF_OT_modal")
-    # turned out to be an unreliable way to check this (observed returning
-    # False for classes that were, in fact, still registered -- confirmed via
-    # bpy.ops.easy_shelf.modal.get_rna_type() succeeding regardless), so a
-    # guarded "register only if missing" check was itself the bug: it kept
-    # calling register_class on an already-registered class every 0.5s,
-    # raising ValueError (Blender does NOT raise RuntimeError for this, only
-    # the old comment assumed so), uncaught, permanently killing this timer
-    # on its very first tick. Just try it and swallow either exception type.
+        return
     try:
-        bpy.utils.register_class(EASYSHELF_OT_modal)
-    except (RuntimeError, ValueError):
+        bpy.ops.easy_shelf.modal('INVOKE_DEFAULT')
+    except Exception:
         pass
-    win = bpy.context.window
-    if win is None:
-        return 0.5
-    # Any area can host the modal now (it finds the area under the cursor
-    # itself); prefer a 3D Viewport so behavior is identical to before
-    # whenever one exists.
-    for area in sorted(win.screen.areas, key=lambda a: a.type != 'VIEW_3D'):
-        region = next((r for r in area.regions if r.type == 'WINDOW'), None)
-        if region is None:
-            continue
-        try:
-            with bpy.context.temp_override(window=win, area=area, region=region):
-                bpy.ops.easy_shelf.modal('INVOKE_DEFAULT')
-        except Exception:
-            pass
-        return 0.5
-    return 0.5
+
+
+# ---------------------------------------------------------------------------
+# Click handling -- a gizmo: Blender hit-tests it on mouse move and hands it
+# the press only when the cursor is over a shelf part, so nothing runs (and no
+# modal operator is resident) while the shelf sits idle.
+# ---------------------------------------------------------------------------
+
+_pending_click = None  # ('button', item) | ('menu', index, target): runs on release, once the gizmo tweak is over
+
+
+def _clear_hover():
+    global _hover_index, _orient_hover, _drag_hover, _resize_hover
+    if _hover_index is None and not (_orient_hover or _drag_hover or _resize_hover):
+        return
+    _hover_index = None
+    _orient_hover = _drag_hover = _resize_hover = False
+    _tag_viewports_redraw()
+
+
+def _input_hit(context, mx, my):
+    """Hover bookkeeping for a cursor at region coords (mx, my); True when it
+    is over a clickable part of the shelf."""
+    global _hover_index, _orient_hover, _drag_hover, _resize_hover
+    global _mouse_x, _mouse_y, _active_area_ptr
+    area, region = context.area, context.region
+    if area is None or region is None or _moving_index is not None:
+        return False
+    _sync_active_target(area, context.mode)
+    _active_area_ptr = area.as_pointer()
+    _mouse_x, _mouse_y = mx, my
+    new_hover = None
+    new_resize_hover = new_orient_hover = new_drag_hover = False
+    if _should_draw_shelf():
+        _, _, _, _, rects = shelf_geometry(region)
+        new_hover = _slot_at(rects, _enabled_items(), mx, my)
+        ox0, oy0, ox1, oy1 = orientation_button_rect(region)
+        new_orient_hover = ox0 <= mx <= ox1 and oy0 <= my <= oy1
+        gx0, gy0, gx1, gy1 = drag_handle_rect(region)
+        new_drag_hover = gx0 <= mx <= gx1 and gy0 <= my <= gy1
+        rx0, ry0, rx1, ry1 = resize_corner_rect(region)
+        new_resize_hover = rx0 <= mx <= rx1 and ry0 <= my <= ry1
+        if new_resize_hover:
+            new_hover = None
+    # redraw on any state change, and continuously while hovering so the
+    # tooltip box tracks the cursor
+    should_redraw = (new_hover != _hover_index
+                      or new_orient_hover != _orient_hover or new_drag_hover != _drag_hover
+                      or new_resize_hover != _resize_hover
+                      or new_hover is not None or new_orient_hover or new_drag_hover)
+    _hover_index = new_hover
+    _orient_hover = new_orient_hover
+    _drag_hover = new_drag_hover
+    _resize_hover = new_resize_hover
+    if should_redraw:
+        _tag_viewports_redraw()
+    return new_hover is not None or new_orient_hover or new_drag_hover or new_resize_hover
+
+
+def _run_pending_click(context):
+    global _pending_click
+    pending, _pending_click = _pending_click, None
+    area, region = context.area, context.region
+    if pending is None or area is None or region is None:
+        return
+    if pending[0] == 'menu':
+        prefs = get_prefs()
+        coll, idx_attr = _target_collection(prefs, pending[2])
+        real_indices = _visible_real_indices(coll)
+        if pending[1] < len(real_indices):
+            setattr(prefs, idx_attr, real_indices[pending[1]])
+            # explicit INVOKE_DEFAULT -- called from a script context (not a
+            # real UI button click), so without it every operator drawn
+            # inside the menu (Delete's own invoke_confirm included) silently
+            # runs EXEC-only and skips its invoke()/dialog.
+            with context.temp_override(window=context.window, area=area, region=region):
+                bpy.ops.wm.call_menu('INVOKE_DEFAULT', name="EASYSHELF_MT_shelf_button_context")
+        return
+    btn = pending[1]
+    try:
+        # the command must run in the editor it was clicked in
+        # (bpy.ops.uv.* / node.* poll on the area type)
+        with context.temp_override(window=context.window, area=area, region=region):
+            _exec_shelf_command(btn.command)
+    except Exception as e:
+        _tag_viewports_redraw()
+        print(f"Shelf button ({btn.label}) failed: {e}")
+
+
+class EASYSHELF_GT_input(bpy.types.Gizmo):
+    bl_idname = "EASYSHELF_GT_input"
+
+    def test_select(self, context, location):
+        return 0 if _input_hit(context, location[0], location[1]) else -1
+
+    def draw(self, context):
+        if not self.is_highlight:  # cursor left the shelf/region: Blender sends no event for that
+            _clear_hover()
+
+    def invoke(self, context, event):
+        global _pressed_index, _pending_click
+        global _resizing_shelf, _resize_origin, _resize_start_dist, _resize_start_scale
+        global _dragging_shelf, _drag_target, _drag_start_mouse, _drag_start_abs, _drag_region_width
+        global _drag_start_margins, _drag_live_margins
+        area, region = context.area, context.region
+        mx, my = event.mouse_region_x, event.mouse_region_y
+        _sync_active_target(area, context.mode)
+        if not _should_draw_shelf():
+            return {'CANCELLED'}
+        items = _enabled_items()
+        x, y, panel_w, panel_h, rects = shelf_geometry(region)
+
+        if event.type == 'RIGHTMOUSE':
+            i = _slot_at(rects, items, mx, my)
+            if i is None:
+                return {'CANCELLED'}
+            _pending_click = ('menu', i, _active_target)
+            return {'RUNNING_MODAL'}
+
+        rx0, ry0, rx1, ry1 = resize_corner_rect(region)
+        if rx0 <= mx <= rx1 and ry0 <= my <= ry1:
+            _resizing_shelf = True
+            _resize_origin = (x, y + panel_h)
+            _resize_start_dist = max(1.0, math.hypot((rx0 if _is_vertical() else rx1) - x, ry0 - (y + panel_h)))
+            _resize_start_scale = get_prefs().shelf_scale
+            _tag_viewports_redraw()
+            return {'RUNNING_MODAL'}
+        i = _slot_at(rects, items, mx, my)
+        if i is not None:
+            _pressed_index = i
+            btn = items[i]
+            if btn.is_separator:
+                btn.collapsed = not btn.collapsed  # update= saves the config
+            if btn.command:
+                _pending_click = ('button', btn)
+            _tag_viewports_redraw()
+            return {'RUNNING_MODAL'}
+
+        ox0, oy0, ox1, oy1 = orientation_button_rect(region)
+        if ox0 <= mx <= ox1 and oy0 <= my <= oy1:
+            prefs = get_prefs()
+            if prefs is not None:
+                p = _placement(prefs, _active_target)
+                p.orientation = 'HORIZONTAL' if p.orientation == 'VERTICAL' else 'VERTICAL'
+                # pivot on the toggle: shift the shelf so the button stays under the cursor.
+                # ponytail: near a viewport edge geometry clamps, so the button may still shift a little.
+                nx0, ny0, nx1, ny1 = orientation_button_rect(region)
+                p.left_margin_pct = max(0.0, min(1.0, p.left_margin_pct + ((ox0 + ox1) - (nx0 + nx1)) / 2.0 / region.width))
+                p.top_margin = max(0, round(p.top_margin - ((oy0 + oy1) - (ny0 + ny1)) / 2.0))
+            _tag_viewports_redraw()
+            return {'RUNNING_MODAL'}
+
+        gx0, gy0, gx1, gy1 = drag_handle_rect(region)
+        if gx0 <= mx <= gx1 and gy0 <= my <= gy1:
+            _dragging_shelf = True
+            _drag_target = _active_target
+            _drag_start_mouse = (mx, my)
+            _drag_start_abs = (event.mouse_x, event.mouse_y)
+            _drag_region_width = region.width
+            _drag_start_margins = _position(region)
+            _drag_live_margins = _drag_start_margins
+            _tag_viewports_redraw()
+            return {'RUNNING_MODAL'}
+        return {'CANCELLED'}
+
+    def modal(self, context, event, tweak):
+        global _mouse_x, _mouse_y, _drag_live_margins
+        if event.type != 'MOUSEMOVE':
+            return {'RUNNING_MODAL'}
+        if _dragging_shelf:
+            dx = event.mouse_x - _drag_start_abs[0]
+            dy = event.mouse_y - _drag_start_abs[1]
+            _mouse_x, _mouse_y = _drag_start_mouse[0] + dx, _drag_start_mouse[1] + dy
+            start_top, start_left = _drag_start_margins
+            _drag_live_margins = (max(0.0, start_top - dy), max(0.0, start_left + dx))
+            _tag_viewports_redraw()
+        elif _resizing_shelf:
+            area, region, mx, my = _area_under_mouse(context, event)
+            prefs = get_prefs()
+            if prefs is not None and area is not None:
+                d = math.hypot(mx - _resize_origin[0], my - _resize_origin[1])
+                prefs.shelf_scale = max(0.5, min(3.0, _resize_start_scale * d / _resize_start_dist))
+            _tag_viewports_redraw()
+        return {'RUNNING_MODAL'}
+
+    def exit(self, context, cancel):
+        global _resizing_shelf, _dragging_shelf, _drag_live_margins, _pressed_index, _pending_click
+        if _resizing_shelf:
+            _resizing_shelf = False
+            _save_prefs()
+        if _dragging_shelf:
+            _dragging_shelf = False
+            prefs = get_prefs()
+            if prefs is not None and _drag_live_margins is not None and _drag_target is not None:
+                top, left_px = _drag_live_margins
+                p = _placement(prefs, _drag_target)
+                p.top_margin = round(top)  # IntProperty -- rejects a bare float
+                if _drag_region_width:
+                    p.left_margin_pct = max(0.0, min(1.0, left_px / _drag_region_width))
+            _drag_live_margins = None
+        _pressed_index = None
+        if cancel:
+            _pending_click = None
+        else:
+            _run_pending_click(context)
+        _tag_viewports_redraw()
+
+
+class _InputGroupBase:
+    bl_label = "Shelf Input"
+    bl_region_type = 'WINDOW'
+    bl_options = {'PERSISTENT'}
+
+    @classmethod
+    def poll(cls, context):
+        return get_prefs() is not None
+
+    def setup(self, context):
+        self.gizmos.new(EASYSHELF_GT_input.bl_idname)
+
+    @classmethod
+    def setup_keymap(cls, keyconfig):
+        km = keyconfig.keymaps.new(name=cls.bl_idname, space_type=cls.bl_space_type, region_type='WINDOW')
+        if not km.keymap_items:
+            for button in ('LEFTMOUSE', 'RIGHTMOUSE'):
+                km.keymap_items.new("gizmogroup.gizmo_tweak", button, 'PRESS', any=True)
+        return km
+
+
+class EASYSHELF_GGT_input_view3d(_InputGroupBase, bpy.types.GizmoGroup):
+    bl_idname = "EASYSHELF_GGT_input_view3d"
+    bl_space_type = 'VIEW_3D'
+
+
+class EASYSHELF_GGT_input_image(_InputGroupBase, bpy.types.GizmoGroup):
+    bl_idname = "EASYSHELF_GGT_input_image"
+    bl_space_type = 'IMAGE_EDITOR'
+
+
+class EASYSHELF_GGT_input_node(_InputGroupBase, bpy.types.GizmoGroup):
+    bl_idname = "EASYSHELF_GGT_input_node"
+    bl_space_type = 'NODE_EDITOR'
 
 
 classes = (
@@ -3649,12 +3662,16 @@ classes = (
     EASYSHELF_MT_pie,
     *_pie_page_classes,
     EASYSHELF_OT_modal,
+    EASYSHELF_GT_input,
+    EASYSHELF_GGT_input_view3d,
+    EASYSHELF_GGT_input_image,
+    EASYSHELF_GGT_input_node,
     EASYSHELF_OT_add_from_context,
 )
 
 
 def register():
-    global _modal_stop, _icon_previews, _last_alive, _last_screen_ptr, _restart_requested, _shelf_hidden
+    global _modal_stop, _icon_previews, _last_alive, _shelf_hidden
     _shelf_hidden = False
     _icon_previews = bpy.utils.previews.new()
     for cls in classes:
@@ -3695,21 +3712,6 @@ def register():
     # make _modal_is_alive() report "alive" for up to _MODAL_HEARTBEAT_TIMEOUT
     # seconds before any instance in *this* session has actually run.
     _last_alive = 0.0
-    _last_screen_ptr = None
-    _restart_requested = False
-    # persistent=True -- without it Blender silently drops this timer on the
-    # next "load a new file/scene in this window" (File > New, opening a
-    # different .blend, ...), since bpy.app.timers are tied to the current
-    # file session by default. register() only runs once per addon-enable,
-    # not per file load, so losing the timer here also permanently loses
-    # the one thing that self-heals the modal operator if THAT dies on the
-    # same file load (which it does, the same way it already does on a
-    # workspace-tab switch -- see _start_modal()'s own docstring). Net
-    # effect without this flag: shelf hangs unresponsive after loading a
-    # new scene, since the draw handler itself (registered on the Space
-    # *type*, not per-file) keeps rendering it, but nothing is left alive
-    # to notice or restart the dead click-handling modal underneath it.
-    bpy.app.timers.register(_start_modal, first_interval=0.2, persistent=True)
     if hasattr(bpy.types, "UI_MT_button_context_menu"):
         bpy.types.UI_MT_button_context_menu.append(_shelf_context_menu_draw)
 

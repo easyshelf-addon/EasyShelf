@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "easy_shelf"
-version = "0.3.4"
+version = "0.3.5"
 name = "EasyShelf"
 tagline = "Customizable quick-access button shelf for any workflow"
 maintainer = "DenisZakharov"
